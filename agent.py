@@ -1,96 +1,109 @@
-"""Основной цикл: модель → инструмент → результат → модель."""
-
-import json
 import os
-from pathlib import Path
+import subprocess
+import json
+
+try:
+    import readline
+    readline.parse_and_bind('set bind-tty-special-chars off')
+    readline.parse_and_bind('set input-meta on')
+    readline.parse_and_bind('set output-meta on')
+    readline.parse_and_bind('set convert-meta off')
+except ImportError:
+    pass
 
 from openai import OpenAI
 from dotenv import load_dotenv
 
+load_dotenv(override=True)
 
-SYSTEM = """Ты помощник для работы с кодом. Отвечай по-русски."""
+client = OpenAI(
+    base_url=os.getenv("OPENAI_BASE_URL"),
+    api_key=os.getenv("OPENAI_API_KEY")
+)
+
+MODEL = os.environ.get("MODEL_ID", "deepseek/deepseek-v4-flash-free")
+SYSTEM = f"You are a coding agent at {os.getcwd()}. Use bash to solve tasks. Act, don't explain."
 
 TOOLS = [{
     "type": "function",
     "function": {
-    "name": "read_file",
-    "description": "Прочитать текстовый файл в текущей папке проекта.",
-    "parameters": {
-        "type": "object",
-        "properties": {"path": {"type": "string"}},
-        "required": ["path"],
-        "additionalProperties": False,
-    },
-    },
+        "name": "bash",
+        "description": "Run a shell command.",
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "command": {"type": "string"}
+            },
+            "required": ["command"],
+        },
+    }
 }]
 
+def run_bash(command: str) -> str:
+    dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
+    if any(d in command for d in dangerous):
+        return "Error: Dangerous command blocked"
+    try:
+        r = subprocess.run(command, shell=True, cwd=os.getcwd(),
+                       capture_output=True, text=True, errors="replace", timeout=120)
+        out = (r.stdout + r.stderr).strip()
+        return out[:50000] if out else "(no output)"
+    except subprocess.TimeoutExpired:
+        return "Error: Timeout (120s)"
+    except (FileNotFoundError, OSError) as e:
+        return f"Error: {e}"
 
-def read_file(path: str) -> str:
-    root = Path.cwd().resolve()
-    target = (root / path).resolve()
-    if not target.is_relative_to(root):
-        raise ValueError("Файл должен находиться внутри проекта")
-    if any(part == ".git" or part.startswith(".env")
-           for part in target.relative_to(root).parts):
-        raise ValueError("Чтение .git и .env запрещено")
-    with target.open(encoding="utf-8") as file:
-        return file.read(30000)
-
-
-def agent_loop(client: OpenAI, model: str, task: str) -> str:
-    messages = [{"role": "system", "content": SYSTEM},
-                {"role": "user", "content": task}]
-
-    for _ in range(20):
-        # 1. Отправляем задачу и предыдущие результаты инструментов модели.
+def agent_loop(messages: list):
+    api_messages = [{"role": "system", "content": SYSTEM}] + messages
+    while True:
         response = client.chat.completions.create(
-            model=model,
-            messages=messages,
+            model=MODEL,
+            messages=api_messages,
             tools=TOOLS,
+            max_tokens=8000,
         )
-        choice = response.choices[0]
-        if choice.finish_reason not in {"stop", "tool_calls"}:
-            raise RuntimeError(f"Ответ модели не завершён: {choice.finish_reason}")
-        message = choice.message
-        messages.append(message.model_dump(exclude_none=True))
-
-        # 2. Если инструментов нет — модель закончила работу.
-        calls = message.tool_calls or []
-        if not calls:
-            return message.content or ""
-
-        # 3. Выполняем инструменты и возвращаем результаты в следующий запрос.
-        for call in calls:
-            function = call.function
-            print(f"Инструмент: {function.name}({function.arguments})")
-            try:
-                if function.name != "read_file":
-                    raise ValueError(f"Неизвестный инструмент: {function.name}")
-                args = json.loads(function.arguments)
-                result = read_file(args["path"])
-            except (OSError, ValueError, KeyError, TypeError) as error:
-                result = f"Ошибка: {error}"
-            messages.append({
+        assistant_message = response.choices[0].message
+        
+        messages.append({
+            "role": "assistant",
+            "content": assistant_message.content,
+            "tool_calls": assistant_message.tool_calls
+        })
+        api_messages.append(assistant_message)
+        
+        tool_calls = assistant_message.tool_calls
+        if not tool_calls:
+            return
+            
+        for tool_call in tool_calls:
+            function_args = json.loads(tool_call.function.arguments)
+            command = function_args.get("command")
+            print(f"\033[33m$ {command}\033[0m")
+            output = run_bash(command)
+            print(output[:200])
+            
+            tool_result = {
                 "role": "tool",
-                "tool_call_id": call.id,
-                "content": result,
-            })
-
-    raise RuntimeError("Достигнут лимит: 20 шагов агента")
-
+                "tool_call_id": tool_call.id,
+                "content": output,
+            }
+            messages.append(tool_result)
+            api_messages.append(tool_result)
 
 if __name__ == "__main__":
-    load_dotenv(Path(__file__).with_name(".env"))
-    model = os.environ.get("OPENAI_MODEL")
-    if not model or not os.environ.get("OPENAI_API_KEY"):
-        raise SystemExit("Задай OPENAI_API_KEY и OPENAI_MODEL в .env или окружении")
-    client = OpenAI(base_url=os.environ.get("OPENAI_BASE_URL"))
+    print("Enter a question, press Enter to send. Type q to quit.\n")
+    history = []
     while True:
         try:
-            task = input("Задача > ").strip()
-            if task.lower() in {"exit", "quit"}:
-                break
-            if task:
-                print(agent_loop(client, model, task))
+            query = input("\033[36ms01 >> \033[0m")
         except (EOFError, KeyboardInterrupt):
             break
+        if query.strip().lower() in ("q", "exit", ""):
+            break
+        history.append({"role": "user", "content": query})
+        agent_loop(history)
+        
+        last_msg = history[-1]
+        if last_msg["role"] == "assistant" and last_msg.get("content"):
+            print(last_msg["content"])
+        print()
