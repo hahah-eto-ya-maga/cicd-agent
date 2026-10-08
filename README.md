@@ -20,7 +20,7 @@ python agent.py
 `.env` рядом с `agent.py` загружается автоматически. Переменные окружения имеют приоритет.
 
 Для OpenRouter укажи `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, ключ OpenRouter
-в `OPENAI_API_KEY` и ID модели из OpenRouter в `OPENAI_MODEL`.
+в `OPENAI_API_KEY` и ID модели из OpenRouter в `MODEL_ID`.
 Для другого сервиса меняются те же три поля. URL — базовый адрес API, без `/chat/completions`.
 Сервис и выбранная модель должны поддерживать Chat Completions с вызовом инструментов.
 
