@@ -10,5 +10,6 @@ WORKDIR /app
 RUN useradd --create-home --uid 10001 app && mkdir /app/workspaces && chown app:app /app/workspaces
 COPY --from=builder /opt/venv /opt/venv
 COPY agent/agent.py /app/agent/agent.py
+COPY agent/DB.py /app/agent/DB.py
 USER app
 CMD ["python", "agent/agent.py"]

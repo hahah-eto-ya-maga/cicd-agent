@@ -6,6 +6,7 @@ from pathlib import Path
 
 from openai import OpenAI
 from dotenv import load_dotenv
+from DB import Database, DatabaseError
 
 load_dotenv(override=True)
 
@@ -211,17 +212,21 @@ def agent_loop(messages: list):
             messages.append(tool_result)
             api_messages.append(tool_result)
 
-def worker_loop():
+def worker_loop(db: Database):
     global WORKDIR, SYSTEM
 
     workspaces = Path("workspaces").resolve()
-    # Здесь подключиться к PostgreSQL.
-
     while True:
         task = None
-        # Здесь получить task из PostgreSQL: забрать queued и пометить running
-        # одной транзакцией. task — словарь с id, repository, commit_sha,
-        # run_id и run_attempt. Пока подключения нет, task остаётся None.
+        try:
+            db.check_connection()
+            # Здесь вызвать метод db, который забирает queued и помечает running.
+            # Соединение, SQL и транзакция будут внутри класса Database.
+            # Пока таблица и метод не реализованы, task остаётся None.
+        except DatabaseError as error:
+            print(f"Ошибка подключения к PostgreSQL: {error}")
+            time.sleep(5)
+            continue
 
         if task is None:
             time.sleep(2)
@@ -254,7 +259,8 @@ def worker_loop():
 
 
 if __name__ == "__main__":
+    db = Database()
     try:
-        worker_loop()
+        worker_loop(db)
     except KeyboardInterrupt:
         pass
