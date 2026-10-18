@@ -1,9 +1,11 @@
 import psycopg
 from psycopg.rows import dict_row
-from psycopg_pool import ConnectionPool
+from psycopg_pool import ConnectionPool, PoolTimeout
 
+from models.Task import Task
 
 DatabaseError = psycopg.Error
+DatabaseTimeout = PoolTimeout
 
 
 class Database:
@@ -17,11 +19,7 @@ class Database:
             }
         )
 
-    def check_connection(self):
-        with self.pool.connection() as conn:
-            conn.execute("SELECT 1")
-
-    def claim_next_task(self):
+    def claim_next_task(self) -> Task | None:
         with self.pool.connection() as conn:
             query = """
                 UPDATE tasks
