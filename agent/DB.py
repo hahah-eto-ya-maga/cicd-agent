@@ -1,19 +1,28 @@
 import psycopg
 from psycopg.rows import dict_row
+from psycopg_pool import ConnectionPool
 
 
 DatabaseError = psycopg.Error
 
 
 class Database:
-    def _connect(self):
-        # PGHOST, PGPORT, PGDATABASE, PGUSER, PGPASSWORD приходят из Compose.
-        # Использовать через with: транзакция завершается, соединение закрывается.
-        return psycopg.connect(connect_timeout=5, row_factory=dict_row)
+    def __init__(self):
+        self.pool = ConnectionPool(
+            min_size=1,
+            max_size=3,
+            kwargs= {
+                "connect_timeout": 5,
+                "row_factory": dict_row
+            }
+        )
 
     def check_connection(self):
-        with self._connect() as conn:
+        with self.pool.connection() as conn:
             conn.execute("SELECT 1")
+
+    def close(self):
+        self.pool.close()
 
     # Здесь будут методы получения задания, сохранения результата и ошибки.
     # Каждый метод сам открывает соединение и выполняет свою транзакцию.
