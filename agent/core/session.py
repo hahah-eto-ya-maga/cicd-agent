@@ -1,26 +1,32 @@
 import json
+import logging
 from collections.abc import Callable
+from functools import partial
 from pathlib import Path
 from typing import Any, Literal
 
 from openai import OpenAI
 
-from hooks.logging import log_tool_call, log_tool_result
-from hooks.permissions import permission_hook
-from tools.definitions import TOOLS
-from tools.files import run_edit, run_glob, run_read, run_write
-from tools.shell import run_bash
+from core.hooks.logging import log_tool_call, log_tool_result
+from core.hooks.permissions import permission_hook
+from core.tools.definitions import TOOLS
+from core.tools.files import run_edit, run_glob, run_read, run_write
+from core.tools.shell import run_bash
 
 
 HookEvent = Literal["UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
 
 
 class AgentSession:
-    def __init__(self, client: OpenAI, model: str, workdir: Path):
+    def __init__(
+        self, client: OpenAI, model: str, workdir: Path,
+        logger: logging.Logger | None = None,
+    ):
         self.client = client
         self.model = model
         self.workdir = workdir.resolve()
         self.messages: list[dict] = []
+        self.logger = logger if logger is not None else logging.getLogger(__name__)
         self.hooks: dict[HookEvent, list[Callable[..., str | None]]] = {
             "UserPromptSubmit": [],
             "PreToolUse": [],
@@ -28,8 +34,8 @@ class AgentSession:
             "Stop": [],
         }
         self.register_hook("PreToolUse", permission_hook)
-        self.register_hook("PreToolUse", log_tool_call)
-        self.register_hook("PostToolUse", log_tool_result)
+        self.register_hook("PreToolUse", partial(log_tool_call, self.logger))
+        self.register_hook("PostToolUse", partial(log_tool_result, self.logger))
 
     def register_hook(self, event: HookEvent, callback: Callable[..., str | None]):
         self.hooks[event].append(callback)
@@ -43,6 +49,7 @@ class AgentSession:
         return None
 
     def submit(self, text: str) -> str:
+        self.logger.info("Задача:\n%s", text)
         self.messages.append({"role": "user", "content": text})
         # callback(text); результат этого события не меняет управление.
         self.trigger_hooks("UserPromptSubmit", text)
@@ -76,6 +83,8 @@ class AgentSession:
                 max_tokens=8000,
             )
             assistant_message = response.choices[0].message
+            if assistant_message.content:
+                self.logger.info("Агент:\n%s", assistant_message.content)
             
             self.messages.append({
                 "role": "assistant",
@@ -89,6 +98,7 @@ class AgentSession:
                 # callback(messages); строка возвращает задачу модели на доработку.
                 reason = self.trigger_hooks("Stop", self.messages)
                 if reason is not None:
+                    self.logger.info("Stop вернул задачу на доработку: %s", reason)
                     message = {"role": "user", "content": reason}
                     self.messages.append(message)
                     api_messages.append(message)
