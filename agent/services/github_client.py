@@ -1,18 +1,24 @@
 import io
+import base64
+import os
 import re
+import subprocess
 import zipfile
+from pathlib import Path
 from urllib.parse import urlparse
 
 import requests
 
 
 class GitHubError(Exception):
-    """Ошибка обращения к GitHub API или загрузки логов."""
+    """Ошибка обращения к GitHub через API или Git."""
 
 
 class GitHubClient:
-    def __init__(self, token: str | None = None, timeout: int = 30):
+    def __init__(self, token: str | None = None, timeout: int = 30, git_timeout: int = 120):
         self.timeout = timeout
+        self.git_timeout = git_timeout
+        self._token = token
         self.session = requests.Session()
         self.session.headers.update({
             "Accept": "application/vnd.github+json",
@@ -47,6 +53,39 @@ class GitHubClient:
         path = f"{self._repository_path(repository)}/actions/runs/{run_id}"
         with self._request("GET", path) as response:
             return response.json()
+
+    def fetch_commit(self, repository: str, commit_sha: str, cache: Path) -> None:
+        """Скачать коммит в уже созданный bare-кеш. Папки и worktree готовит loader."""
+        self._repository_path(repository)
+        if not re.fullmatch(r"[0-9a-fA-F]{40}", commit_sha):
+            raise GitHubError("Ожидается полный SHA коммита GitHub (40 символов)")
+        commit_sha = commit_sha.lower()
+        env = os.environ.copy()
+        env["GIT_TERMINAL_PROMPT"] = "0"
+        credentials = None
+        if self._token:
+            credentials = base64.b64encode(f"x-access-token:{self._token}".encode()).decode()
+            # Секрет передаётся только процессу Git, без записи в URL и конфиг кеша.
+            index = int(env.get("GIT_CONFIG_COUNT", "0"))
+            env["GIT_CONFIG_COUNT"] = str(index + 1)
+            env[f"GIT_CONFIG_KEY_{index}"] = "http.https://github.com/.extraheader"
+            env[f"GIT_CONFIG_VALUE_{index}"] = f"Authorization: Basic {credentials}"
+        try:
+            result = subprocess.run(
+                ["git", "--git-dir", str(cache), "fetch", "--no-tags", "--depth=1",
+                 f"https://github.com/{repository}.git", f"{commit_sha}:refs/commits/{commit_sha}"],
+                capture_output=True, text=True, errors="replace",
+                timeout=self.git_timeout, env=env,
+            )
+        except (OSError, subprocess.TimeoutExpired) as error:
+            raise GitHubError(f"Не удалось скачать коммит из {repository}") from error
+        if result.returncode != 0:
+            message = result.stderr.strip() or "git fetch завершился ошибкой"
+            if self._token:
+                message = message.replace(self._token, "***")
+            if credentials:
+                message = message.replace(credentials, "***")
+            raise GitHubError(message)
 
     def get_workflow_logs(self, repository: str, run_id: int, run_attempt: int) -> str:
         path = (

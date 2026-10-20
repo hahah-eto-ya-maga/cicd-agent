@@ -10,6 +10,7 @@ from unittest.mock import Mock, patch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "agent"))
 
 from services.repository_loader import RepositoryLoader, RepositoryLoadError
+from services.github_client import GitHubClient, GitHubError
 
 
 class RepositoryLoaderTests(unittest.TestCase):
@@ -24,7 +25,9 @@ class RepositoryLoaderTests(unittest.TestCase):
         self.git("-C", str(self.source), "config", "user.email", "test@example.com")
         self.first = self.commit("first")
         self.second = self.commit("second")
-        self.loader = RepositoryLoader(self.root / "repos")
+        self.github = GitHubClient()
+        self.addCleanup(self.github.close)
+        self.loader = RepositoryLoader(self.root / "repos", github=self.github)
         self.fetches = 0
 
         # Реальный Git и локальный remote: тест не обращается к GitHub.
@@ -40,7 +43,7 @@ class RepositoryLoaderTests(unittest.TestCase):
             ]
             return original_run(command, **kwargs)
 
-        mock = patch("services.repository_loader.subprocess.run", side_effect=local_remote)
+        mock = patch("services.github_client.subprocess.run", side_effect=local_remote)
         mock.start()
         self.addCleanup(mock.stop)
 
@@ -59,7 +62,11 @@ class RepositoryLoaderTests(unittest.TestCase):
         first = self.loader.workspace_path("owner/repo", 1)
         second = self.loader.workspace_path("owner/repo", 2)
         third = self.loader.workspace_path("owner/repo", 3)
-        self.assertIsNone(self.loader.load("owner/repo", self.first, first))
+        with patch.object(self.github, "fetch_commit", wraps=self.github.fetch_commit) as fetch:
+            with patch.object(self.loader, "_git", wraps=self.loader._git) as local_git:
+                self.assertIsNone(self.loader.load("owner/repo", self.first, first))
+        fetch.assert_called_once_with("owner/repo", self.first, first.parent.parent / "cache.git")
+        self.assertFalse(any("fetch" in call.args for call in local_git.call_args_list))
         self.assertEqual((first / "sample.txt").read_text(), "first")
         self.assertEqual(self.git("-C", str(first), "rev-parse", "HEAD"), self.first)
         self.loader.load("owner/repo", self.first, second)
@@ -113,26 +120,28 @@ class RepositoryLoaderTests(unittest.TestCase):
             KeyboardInterrupt,
         ]
         loader = Mock()
-        loader.workspace_path.return_value = self.root / "repos/owner/repo/workspaces/task-42"
-        loader.load.side_effect = RepositoryLoadError("Download failed")
+        loader.logs_path.return_value = self.root / "repos/owner/repo/logs/task-42"
+        loader.prepare.side_effect = RepositoryLoadError("Download failed")
         with patch("worker.AgentSession") as session, redirect_stdout(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
-                worker_loop(db, Mock(), "test", loader, Mock())
+                worker_loop(db, Mock(), "test", loader)
         session.assert_not_called()
         paths = list((self.root / "repos/owner/repo/logs/task-42").glob("*.log"))
         self.assertEqual(len(paths), 1)
         self.assertIn("Download failed", paths[0].read_text(encoding="utf-8"))
 
     def test_git_token_is_not_in_arguments_or_saved_config(self):
-        self.loader = RepositoryLoader(self.root / "repos", token="test-secret")
+        github = GitHubClient(token="test-secret")
+        self.addCleanup(github.close)
+        self.loader = RepositoryLoader(self.root / "repos", github=github)
         workspace = self.loader.workspace_path("owner/repo", 1)
         self.loader.load("owner/repo", self.first, workspace)
         config = (self.root / "repos/owner/repo/cache.git/config").read_text()
         self.assertNotIn("test-secret", config)
         self.assertNotIn("Authorization", config)
-        with patch("services.repository_loader.subprocess.run") as run:
+        with patch("services.github_client.subprocess.run") as run:
             run.return_value.returncode = 0
-            self.loader._git("fetch", "https://github.com/owner/repo.git")
+            github.fetch_commit("owner/repo", self.first, workspace.parent.parent / "cache.git")
         self.assertNotIn("test-secret", str(run.call_args.args))
         env = run.call_args.kwargs["env"]
         self.assertTrue(any(
@@ -144,26 +153,39 @@ class RepositoryLoaderTests(unittest.TestCase):
         from worker import worker_loop
 
         workspace = self.root / "repos/owner/repo/workspaces/task-42"
-        workspace.mkdir(parents=True)
         db = Mock()
         db.claim_next_task.side_effect = [
             {"id": 42, "repository": "owner/repo", "commit_sha": self.first,
              "run_id": 123, "run_attempt": 2},
             KeyboardInterrupt,
         ]
-        loader = Mock()
-        loader.workspace_path.return_value = workspace
-        github = Mock()
-        github.get_workflow_logs.return_value = "CI failed"
-        with patch("worker.AgentSession") as session, redirect_stdout(io.StringIO()):
+        with patch.object(self.github, "get_workflow_logs", return_value="CI failed") as get_logs, \
+                patch("worker.AgentSession") as session, redirect_stdout(io.StringIO()):
             with self.assertRaises(KeyboardInterrupt):
-                worker_loop(db, Mock(), "test", loader, github)
-        github.get_workflow_logs.assert_called_once_with("owner/repo", 123, 2)
+                worker_loop(db, Mock(), "test", self.loader)
+        get_logs.assert_called_once_with("owner/repo", 123, 2)
         self.assertEqual((workspace / "ci.log").read_text(), "CI failed")
         session.return_value.submit.assert_called_once()
         paths = list((self.root / "repos/owner/repo/logs/task-42").glob("*.log"))
         self.assertEqual(len(paths), 1)
         self.assertIn("Сессия задания 42 завершена", paths[0].read_text(encoding="utf-8"))
+
+    def test_prepare_failure_stops_worker_before_session(self):
+        from worker import worker_loop
+
+        db = Mock()
+        db.claim_next_task.side_effect = [
+            {"id": 42, "repository": "owner/repo", "commit_sha": self.first,
+             "run_id": 123, "run_attempt": 2},
+            KeyboardInterrupt,
+        ]
+        with patch.object(self.github, "get_workflow_logs", side_effect=GitHubError("CI logs unavailable")), \
+                patch("worker.AgentSession") as session, redirect_stdout(io.StringIO()):
+            with self.assertRaises(KeyboardInterrupt):
+                worker_loop(db, Mock(), "test", self.loader)
+        session.assert_not_called()
+        paths = list(self.loader.logs_path("owner/repo", 42).glob("*.log"))
+        self.assertIn("CI logs unavailable", paths[0].read_text(encoding="utf-8"))
 
 
 if __name__ == "__main__":

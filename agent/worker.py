@@ -6,7 +6,6 @@ from openai import OpenAI
 from services.database import Database, DatabaseError, DatabaseTimeout
 from core.session import AgentSession
 from services.repository_loader import RepositoryLoader
-from services.github_client import GitHubClient
 from services.task_logging import task_logging
 
 
@@ -15,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 def worker_loop(
     db: Database, client: OpenAI, model: str,
-    loader: RepositoryLoader, github: GitHubClient,
+    loader: RepositoryLoader,
 ):
     while True:
         try:
@@ -31,8 +30,7 @@ def worker_loop(
             continue
 
         try:
-            workspace = loader.workspace_path(task["repository"], task["id"])
-            log_dir = workspace.parent.parent / "logs" / f"task-{task['id']}"
+            log_dir = loader.logs_path(task["repository"], task["id"])
             with task_logging(log_dir, attempt=task.get("attempts", 1)) as task_logger:
                 try:
                     task_logger.info(
@@ -40,15 +38,8 @@ def worker_loop(
                         task["id"], task["repository"], task["commit_sha"],
                         task.get("run_id"), task.get("run_attempt"),
                     )
-                    loader.load(task["repository"], task["commit_sha"], workspace)
-                    task_logger.info("Код подготовлен: %s", workspace)
-                    logs = github.get_workflow_logs(
-                        task["repository"], task["run_id"], task["run_attempt"],
-                    )
-                    # Не перезаписываем одноимённый файл из репозитория.
-                    with (workspace / "ci.log").open("x", encoding="utf-8") as file:
-                        file.write(logs)
-                    task_logger.info("Логи CI сохранены: %s", workspace / "ci.log")
+                    workspace = loader.prepare(task)
+                    task_logger.info("Код и логи CI подготовлены: %s", workspace)
 
                     session = AgentSession(
                         client=client, model=model, workdir=workspace, logger=task_logger,

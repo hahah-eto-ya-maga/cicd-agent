@@ -26,9 +26,9 @@ def main():
         db = Database()
         token = os.getenv("GITHUB_TOKEN")
         github = GitHubClient(token=token)
-        loader = RepositoryLoader(repos_dir=Path("repos"), token=token)
+        loader = RepositoryLoader(repos_dir=Path("repos"), github=github)
         try:
-            worker_loop(db, client, model, loader, github)
+            worker_loop(db, client, model, loader)
         except KeyboardInterrupt:
             pass
         finally:

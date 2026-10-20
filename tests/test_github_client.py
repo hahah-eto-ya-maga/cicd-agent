@@ -1,5 +1,7 @@
 import io
 import json
+import base64
+import subprocess
 import sys
 import unittest
 import zipfile
@@ -73,6 +75,22 @@ class GitHubClientTests(unittest.TestCase):
             with self.assertRaises(GitHubError):
                 self.client.get_workflow_run("../repo", 42)
         api.assert_not_called()
+
+    def test_fetch_timeout_is_reported(self):
+        with patch("services.github_client.subprocess.run", side_effect=subprocess.TimeoutExpired("git", 120)):
+            with self.assertRaises(GitHubError):
+                self.client.fetch_commit("owner/repo", "a" * 40, Path("cache.git"))
+
+    def test_fetch_error_redacts_token_and_encoded_credentials(self):
+        from types import SimpleNamespace
+
+        credentials = base64.b64encode(b"x-access-token:test-secret").decode()
+        result = SimpleNamespace(returncode=1, stderr=f"failure test-secret {credentials}")
+        with patch("services.github_client.subprocess.run", return_value=result):
+            with self.assertRaises(GitHubError) as error:
+                self.client.fetch_commit("owner/repo", "a" * 40, Path("cache.git"))
+        self.assertNotIn("test-secret", str(error.exception))
+        self.assertNotIn(credentials, str(error.exception))
 
 
 if __name__ == "__main__":
