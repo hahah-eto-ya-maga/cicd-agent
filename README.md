@@ -1,28 +1,36 @@
-# CI/CD agent — начало
+# CI/CD Agent
 
-Пока только основной цикл в `agent.py`, по образцу `s01_agent_loop`
-из learn-claude-code, с OpenAI-совместимым Chat Completions API.
+Агент для поиска и исправления ошибок GitHub Actions. Получает задания из PostgreSQL,
+подготавливает код нужного коммита и логи CI, затем работает с кодом через LLM и инструменты.
 
-Задача → модель → вызов `read_file` → результат обратно модели → ответ.
-Цикл повторяется, пока модель вызывает инструмент (максимум 20 шагов).
+В Docker Compose запускаются агент, Flask-сервер для вебхуков, PostgreSQL и nginx.
+Проект в разработке: запись заданий из вебхука и сохранение итогов пока не подключены.
 
-Запуск в PowerShell:
+## Запуск
 
-```powershell
-python -m pip install -r requirements.txt
-Copy-Item .env.example .env
-# Заполни ключ, URL и модель в .env.
-python agent.py
+Нужны Docker и Docker Compose.
+
+```bash
+cp .env.example .env
 ```
 
-Пример задачи: `Прочитай README.md и объясни, что делает проект`.
-После выполнения одной задачи программа завершается.
-`.env` рядом с `agent.py` загружается автоматически. Переменные окружения имеют приоритет.
+Заполни `.env`:
 
-Для OpenRouter укажи `OPENAI_BASE_URL=https://openrouter.ai/api/v1`, ключ OpenRouter
-в `OPENAI_API_KEY` и ID модели из OpenRouter в `MODEL_ID`.
-Для другого сервиса меняются те же три поля. URL — базовый адрес API, без `/chat/completions`.
-Сервис и выбранная модель должны поддерживать Chat Completions с вызовом инструментов.
+- `OPENAI_API_KEY`, `OPENAI_BASE_URL`, `MODEL_ID` — ключ, адрес API и модель с поддержкой вызова инструментов.
+- `GITHUB_TOKEN` — токен аккаунта бота с доступом к репозиторию и логам Actions.
+- `GITHUB_WEBHOOK_SECRET` — общий секрет с настройкой webhook в GitHub.
+- `POSTGRES_PASSWORD` — пароль базы данных.
 
-Инструмент читает файлы внутри текущей папки и передаёт содержимое выбранному API.
-Дальше добавляем возможности по одной.
+```bash
+docker compose up --build -d
+```
+
+Проверка: [localhost:8080/health](http://localhost:8080/health).
+Вебхук принимает `POST /webhook`; для GitHub нужен публичный HTTPS-адрес.
+
+```bash
+docker compose logs -f agent  # логи агента
+docker compose down           # остановка
+```
+
+Данные и журналы сохраняются в Docker volumes. Подробнее — [DOCKER.md](DOCKER.md).
